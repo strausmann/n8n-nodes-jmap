@@ -64,19 +64,69 @@ function getAuthType(context: IExecuteFunctions | ILoadOptionsFunctions | IPollF
 /**
  * Get JMAP server URL based on credential type
  */
+/**
+ * Rejects a server URL that would carry the credential in the clear.
+ *
+ * The session resource is where the server says where everything else lives —
+ * the API endpoint, the download endpoint. Following it is what this change is
+ * about, and over plain HTTP that answer is rewritable by anyone on the network
+ * path, who can also read the credential off the wire. Requiring TLS is what
+ * makes following the session safe to do.
+ *
+ * Loopback stays exempt so developing against a local JMAP server keeps working.
+ */
+function assertSecureServerUrl(
+	context: IExecuteFunctions | ILoadOptionsFunctions | IPollFunctions,
+	serverUrl: string,
+): void {
+	let parsed: URL;
+
+	try {
+		parsed = new URL(serverUrl);
+	} catch {
+		throw new NodeOperationError(
+			context.getNode(),
+			`The JMAP server URL is not a valid URL: ${serverUrl}`,
+		);
+	}
+
+	const isLoopback =
+		parsed.hostname === 'localhost' ||
+		parsed.hostname === '127.0.0.1' ||
+		parsed.hostname === '[::1]' ||
+		parsed.hostname === '::1';
+
+	if (parsed.protocol !== 'https:' && !isLoopback) {
+		throw new NodeOperationError(
+			context.getNode(),
+			`The JMAP server URL must use https. The session resource decides where every later request goes, and over ${parsed.protocol}// anyone on the network path can redirect those requests and read your credentials in transit.`,
+			{
+				description:
+					'Use an https URL for the server. Plain http is only accepted for localhost during development.',
+			},
+		);
+	}
+}
+
 async function getServerUrl(
 	context: IExecuteFunctions | ILoadOptionsFunctions | IPollFunctions,
 ): Promise<string> {
 	const authType = getAuthType(context);
+	let serverUrl: string;
 
 	if (authType === 'jmapOAuth2Api') {
 		const credentials = await context.getCredentials('jmapOAuth2Api');
-		return (credentials.jmapServerUrl as string).replace(/\/$/, '');
+		serverUrl = (credentials.jmapServerUrl as string).replace(/\/$/, '');
 	} else {
 		// Both jmapBasicAuthApi and jmapBearerTokenApi use 'serverUrl'
 		const credentials = await context.getCredentials(authType);
-		return (credentials.serverUrl as string).replace(/\/$/, '');
+		serverUrl = (credentials.serverUrl as string).replace(/\/$/, '');
 	}
+
+	// Checked here because every path to the server runs through this function.
+	assertSecureServerUrl(context, serverUrl);
+
+	return serverUrl;
 }
 
 /**
@@ -135,6 +185,9 @@ export async function getJmapSession(
 		sessionCache.set(this, session);
 		return session;
 	} catch (error) {
+		// A configuration error should say so rather than arrive as an API
+		// failure, which sends the operator looking at the server instead.
+		if (error instanceof NodeOperationError) throw error;
 		throw new NodeApiError(this.getNode(), error as JsonObject, {
 			message: 'Failed to get JMAP session',
 		});
@@ -189,6 +242,9 @@ export async function jmapApiRequest(
 		const response = await makeJmapRequest(this, 'POST', apiUrl, body as unknown as IDataObject);
 		return response as unknown as IJmapResponse;
 	} catch (error) {
+		// A configuration error should say so rather than arrive as an API
+		// failure, which sends the operator looking at the server instead.
+		if (error instanceof NodeOperationError) throw error;
 		throw new NodeApiError(this.getNode(), error as JsonObject, {
 			message: 'JMAP API request failed',
 		});
