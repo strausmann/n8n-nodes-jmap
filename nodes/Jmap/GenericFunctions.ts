@@ -112,19 +112,63 @@ async function makeJmapRequest(
 }
 
 /**
+ * The session is stable for the lifetime of a node execution, so cache it per
+ * context object. Without this, resolving apiUrl (see getApiUrl) would add one
+ * extra session request to every single method call.
+ */
+const sessionCache = new WeakMap<object, IJmapSession>();
+
+/**
  * Get JMAP session from the server
  */
 export async function getJmapSession(
 	this: IExecuteFunctions | ILoadOptionsFunctions | IPollFunctions,
 ): Promise<IJmapSession> {
+	const cached = sessionCache.get(this);
+	if (cached !== undefined) {
+		return cached;
+	}
+
 	try {
 		const response = await makeJmapRequest(this, 'GET', '/session');
-		return response as unknown as IJmapSession;
+		const session = response as unknown as IJmapSession;
+		sessionCache.set(this, session);
+		return session;
 	} catch (error) {
 		throw new NodeApiError(this.getNode(), error as JsonObject, {
 			message: 'Failed to get JMAP session',
 		});
 	}
+}
+
+/**
+ * Returns the endpoint that JMAP method calls must be sent to.
+ *
+ * Per RFC 8620 section 2 the session resource advertises `apiUrl`, and clients
+ * are expected to use it for method calls. It is not guaranteed to equal the URL
+ * configured in the credential. On Stalwart, for instance, the session lives at
+ * `/jmap/session` while `apiUrl` is `/jmap`, so a user who configures the spec's
+ * discovery URL (`/.well-known/jmap`) gets a 404 on every method call.
+ *
+ * Falls back to the configured URL when no session can be resolved, so setups
+ * that work today keep working.
+ */
+async function getApiUrl(
+	context: IExecuteFunctions | ILoadOptionsFunctions | IPollFunctions,
+): Promise<string> {
+	const serverUrl = await getServerUrl(context);
+
+	try {
+		const session = await getJmapSession.call(context);
+		if (session?.apiUrl) {
+			// apiUrl may be given relative to the session resource
+			return new URL(session.apiUrl, `${serverUrl}/`).toString();
+		}
+	} catch {
+		// Session not reachable — fall through to the configured URL below.
+	}
+
+	return serverUrl;
 }
 
 /**
@@ -141,7 +185,8 @@ export async function jmapApiRequest(
 	};
 
 	try {
-		const response = await makeJmapRequest(this, 'POST', '', body as unknown as IDataObject);
+		const apiUrl = await getApiUrl(this);
+		const response = await makeJmapRequest(this, 'POST', apiUrl, body as unknown as IDataObject);
 		return response as unknown as IJmapResponse;
 	} catch (error) {
 		throw new NodeApiError(this.getNode(), error as JsonObject, {
