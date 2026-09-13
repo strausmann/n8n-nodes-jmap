@@ -68,5 +68,16 @@ export class JmapBasicAuthApi implements ICredentialType {
 				Accept: 'application/json',
 			},
 		},
+		rules: [
+			{
+				type: 'responseSuccessBody',
+				properties: {
+					key: 'username',
+					value: '',
+					message:
+						'The server accepted the request but did not authenticate a user (empty "username" in the session response). Check the email and password.',
+				},
+			},
+		],
 	};
 }
